@@ -412,6 +412,10 @@ const fixed = new URLSearchParams(location.search).get('t');
 const BAR = 3.25;                                          // four bars last 13 seconds: the rose blooms on the first beat of bar five
 const CHORDS = [[57, 60, 64], [53, 57, 60], [60, 64, 67], [55, 59, 62], [50, 53, 57], [57, 60, 64], [53, 57, 60], [52, 56, 59]];
 const TUNE = [[76, 72], [72, 69], [67, 72], [74, 71], [77, 74], [76, 72], [69, 72], [71, 68]], ARP = [0, 1, 2, 3, 2, 1, 2, 1];
+// The song: song.mp3 beside this page (80 seconds, cut from 2:23 of the track Ahmed chose). If it is missing, the coded music box plays instead.
+let track = null, trackOK = true;
+if (new URLSearchParams(location.search).get('t') === null) { track = new Audio('song.mp3'); track.preload = 'auto'; track.loop = true; track.addEventListener('error', () => { trackOK = false; }); }
+const useTrack = () => track && trackOK;
 let AU = null, master = null, bus = null, gen = null, fireGain = null, musicT0 = 0, nextBar = 0;
 function bell(midi, when, dur, vol) {                      // one music-box note: three sine partials with a fast attack and a long fall
   const f = 440 * Math.pow(2, (midi - 69) / 12), g = AU.createGain();
@@ -431,7 +435,7 @@ function pad(chord, when) {                                // a quiet held chord
   }
 }
 function schedule() {                                      // keep the next half second of music queued
-  if (!AU || AU.state !== 'running') return;
+  if (!AU || AU.state !== 'running' || useTrack()) return;
   while (musicT0 + nextBar * BAR < AU.currentTime + 0.6) {
     const b = nextBar % 8, t0 = musicT0 + nextBar * BAR, c = CHORDS[b], tones = [c[0], c[1], c[2], c[0] + 12];
     for (let e = 0; e < 8; e++) bell(tones[ARP[e]], t0 + e * BAR / 8, 1.9, 0.1);
@@ -440,6 +444,7 @@ function schedule() {                                      // keep the next half
   }
 }
 function startMusic() {
+  if (useTrack()) { try { track.currentTime = 0; track.volume = 0.95; const pr = track.play(); if (pr) pr.catch(() => {}); } catch (e) {} }
   try {
     if (!AU) {
       AU = new (window.AudioContext || window.webkitAudioContext)();
@@ -458,10 +463,11 @@ function startMusic() {
     if (gen) { const old = gen; old.gain.setTargetAtTime(0, AU.currentTime, 0.04); setTimeout(() => old.disconnect(), 600); }   // a replay cuts the old take
     gen = AU.createGain(); gen.gain.setValueAtTime(0, AU.currentTime); gen.gain.linearRampToValueAtTime(1, AU.currentTime + 0.5); gen.connect(bus);
     musicT0 = AU.currentTime + 0.06; nextBar = 0; schedule();
-    [81, 84, 88, 93].forEach((m, i) => bell(m, musicT0 + DONE + i * 0.07, 3.6, 0.1));                           // a chime as it blooms
+    if (!useTrack()) [81, 84, 88, 93].forEach((m, i) => bell(m, musicT0 + DONE + i * 0.07, 3.6, 0.1));                           // a chime as it blooms
   } catch (e) { AU = null; }                                // no sound is fine: the picture still plays
 }
-document.addEventListener('visibilitychange', () => { if (AU) { if (document.hidden) AU.suspend(); else if (started) AU.resume(); } });
+document.addEventListener('visibilitychange', () => { if (AU) { if (document.hidden) AU.suspend(); else if (started) AU.resume(); }
+  if (track && started) { if (document.hidden) track.pause(); else { const pr = track.play(); if (pr) pr.catch(() => {}); } } });
 
 let started = fixed !== null;
 const again = () => { started = true; T0 = performance.now(); startMusic(); };
@@ -485,7 +491,7 @@ function loop() {
   if (fixed !== null) { render(+fixed); return; }
   requestAnimationFrame(loop);
   if (!started) { intro(now); return; }
-  if (fireGain) fireGain.gain.setTargetAtTime(0.11 * fireLevel((now - T0) / 1000), AU.currentTime, 0.1);
+  if (fireGain) fireGain.gain.setTargetAtTime((useTrack() ? 0.035 : 0.11) * fireLevel((now - T0) / 1000), AU.currentTime, 0.1);
   if (TIER > 0 && now - lastDraw < 30) return;             // hold a steady 30 instead of a stuttering 60
   const gap = now - lastDraw; lastDraw = now;
   render((now - T0) / 1000);
