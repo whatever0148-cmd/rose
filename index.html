@@ -106,14 +106,17 @@ for (let k = 0; k < N; k++) {
 }
 
 // ---------- palettes ----------
-const LV = 32, RED = [], GREEN = [], FIRE = [];
+const LV = 32, RED = [], GREEN = [], FIRE = [], DUST = [], LOVE = [];
 for (let i = 0; i < LV; i++) {
   const b = i / (LV - 1);
   // a real night rose: almost black in the folds, deep blood red in the light, never pink
   RED.push(`rgb(${Math.round(34 + 200 * Math.pow(b, 0.85))},${Math.round(1 + 22 * Math.pow(b, 2.6))},${Math.round(6 + 36 * Math.pow(b, 2.0))})`);
   GREEN.push(`rgb(${Math.round(8 + 40 * b * b)},${Math.round(40 + 112 * Math.pow(b, 1.0))},${Math.round(22 + 46 * b)})`);
+  DUST.push(`rgb(${Math.round(255 * b)},${Math.round(185 * b)},${Math.round(145 * b)})`);          // warm glints
+  LOVE.push(`rgb(${Math.round(226 * b)},${Math.round(40 * b)},${Math.round(62 * b)})`);            // rose red, for hearts and the far background
   FIRE.push(`rgb(${Math.round(110 + 145 * Math.pow(b, 0.45))},${Math.round(14 + 236 * Math.pow(b, 1.35))},${Math.round(6 + 230 * Math.pow(b, 3.4))})`);
 }
+const PRGB = [FIRE, RED, GREEN, DUST, LOVE].map((p) => p.map((c) => c.match(/\d+/g).map(Number)));   // the same colours as numbers
 const FLAME = '.:^*xs#$%@', EMBER = "*+.'`";
 
 // ---------- the code that types itself beside the flower ----------
@@ -124,6 +127,7 @@ const LINES = [
 
 let W = 0, H = 0, FS = 10, CW = 6, CH = 11, COLS = 0, ROWS = 0, zbuf, ibuf, DPR = 1, Q = 1;
 const TOUCH = matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0;
+const LOD = TOUCH ? 0.55 : 1;                             // phones draw about half the loose particles
 function resize() {
   const dpr = DPR = Math.min(window.devicePixelRatio || 1, TOUCH ? 1.5 : 2) * Q;     // Q drops on slow phones to keep it smooth
   // a phone held upright gets the same wide picture as a computer, turned on its side: turn the phone to watch it
@@ -139,10 +143,39 @@ function resize() {
   AC = Math.ceil(CW) + 1; AR = Math.ceil(CH) + 2; AN = Math.floor(2048 / AC);
   atlas.width = 2048; atlas.height = AR * Math.ceil(8000 / AN); slots.clear();
   actx.textBaseline = 'top'; actx.font = `${FS}px ui-monospace, "SF Mono", Menlo, Consolas, monospace`;
+  // small screens (phones): skip thousands of draw calls. Glyphs are blended into one pixel buffer in plain JS and sent to the screen once.
+  SOFT = W * H <= 1.6e6; masks.clear();
+  if (SOFT) {
+    img = ctx.createImageData(W, H); pix = img.data; pix32 = new Uint32Array(pix.buffer);
+    mcan.width = AC; mcan.height = AR; mctx.textBaseline = 'top'; mctx.fillStyle = '#fff';
+    mctx.font = `${FS}px ui-monospace, "SF Mono", Menlo, Consolas, monospace`;
+  }
+}
+const mcan = document.createElement('canvas'), mctx = mcan.getContext('2d', { willReadFrequently: true }), masks = new Map();
+let SOFT = false, img = null, pix = null, pix32 = null;
+function soft(rgb, ch, x, y) {
+  let m = masks.get(ch);
+  if (!m) {                                                // the shape of this character, drawn once and kept
+    mctx.clearRect(0, 0, AC, AR); mctx.fillText(ch, 0, 0);
+    const d = mctx.getImageData(0, 0, AC, AR).data; m = new Uint8Array(AC * AR);
+    for (let i = 0; i < m.length; i++) m[i] = d[i * 4 + 3];
+    masks.set(ch, m);
+  }
+  const r = rgb[0], g = rgb[1], b = rgb[2];
+  for (let j = 0; j < AR; j++) {
+    const yy = y + j; if (yy < 0 || yy >= H) continue;
+    for (let i = 0; i < AC; i++) {
+      const a = m[j * AC + i]; if (!a) continue;
+      const xx = x + i; if (xx < 0 || xx >= W) continue;
+      const o = (yy * W + xx) * 4;
+      pix[o] += ((r - pix[o]) * a) >> 8; pix[o + 1] += ((g - pix[o + 1]) * a) >> 8; pix[o + 2] += ((b - pix[o + 2]) * a) >> 8;
+    }
+  }
 }
 const atlas = document.createElement('canvas'), actx = atlas.getContext('2d'), slots = new Map();
 let AC = 8, AR = 12, AN = 256;
 function stamp(pal, id, level, ch, x, y) {
+  if (SOFT) { soft(PRGB[id][level], ch, Math.round(x), Math.round(y)); return; }
   const key = ((id * 32 + level) << 16) | ch.charCodeAt(0); let s = slots.get(key);
   if (s === undefined) {
     if (slots.size >= 8000) { ctx.fillStyle = pal[level]; ctx.fillText(ch, x, y); return; }
@@ -186,7 +219,7 @@ function render(t) {
 
   // 1. depth buffer: nearest surface point for every character cell
   zbuf.fill(1e9); ibuf.fill(-1);
-  const step = COLS * ROWS < 30000 ? 2 : 1;                // a small screen has few cells, so half the points are enough
+  const step = COLS * ROWS < 30000 ? (Q < 0.9 ? 3 : 2) : 1;                // a small screen has few cells, so half the points are enough
   for (let k = 0; k < N; k += step) {
     const kind = META[k * 4]; if (META[k * 4 + 2] > G[kind]) continue;
     project(k, kind, tmp);
@@ -195,22 +228,21 @@ function render(t) {
     const c = row * COLS + col; if (tmp[2] < zbuf[c]) { zbuf[c] = tmp[2]; ibuf[c] = k; }
   }
 
-  ctx.fillStyle = '#060508'; ctx.fillRect(0, 0, W, H);
+  if (SOFT) pix32.fill(0xff080506); else { ctx.fillStyle = '#060508'; ctx.fillRect(0, 0, W, H); }
   ctx.textBaseline = 'top'; ctx.font = `${FS}px ui-monospace, "SF Mono", Menlo, Consolas, monospace`;
   let last = '';
   const ink = (s) => { if (s !== last) { ctx.fillStyle = s; last = s; } };
   const lvl = (a) => clamp(Math.round(a * (LV - 1)), 0, LV - 1);
-  const put = (ch, px, py, z) => {                         // one glyph on the grid, hidden if the flower is in front of it
+  const put = (pal, id, level, str, px, py, z) => {        // glyphs on the grid from the atlas, hidden if the flower is in front
     const col = Math.round(px / CW), row = Math.round(py / CH);
     if (col < 0 || row < 0 || col >= COLS || row >= ROWS || (z !== undefined && zbuf[row * COLS + col] < z)) return;
-    ctx.fillText(ch, col * CW, row * CH);
+    for (let q = 0; q < str.length; q++) stamp(pal, id, level, str[q], (col + q) * CW, row * CH);
   };
 
   // 2. faint drifting characters far behind
-  for (let i = 0; i < 140; i++) {
+  for (let i = 0; i < 140 * LOD; i++) {
     const px = hash(i + 1) * W, py = ((hash(i + 77) - t * (0.008 + 0.02 * hash(i + 9))) % 1 + 1) % 1 * H;
-    ink(`rgba(190,30,40,${(0.04 + 0.08 * (0.5 + 0.5 * Math.sin(t * (0.5 + hash(i + 3)) + i))).toFixed(3)})`);
-    ctx.fillText(SOURCE[(i * 37) % SOURCE.length], Math.round(px / CW) * CW, Math.round(py / CH) * CH);
+    put(LOVE, 4, lvl(0.06 + 0.1 * (0.5 + 0.5 * Math.sin(t * (0.5 + hash(i + 3)) + i))), SOURCE[(i * 37) % SOURCE.length], px, py);
   }
 
   // 3. the fire: a bed of flames along the bottom, tallest under the stem
@@ -248,61 +280,56 @@ function render(t) {
   }
 
   // 5. builder sparks: each one leaves the fire and lands exactly where the flower is being forged
-  for (let i = 0; i < BUILD.length; i++) {
+  for (let i = 0; i < BUILD.length; i += TOUCH ? 2 : 1) {
     const k = BUILD[i], kind = META[k * 4], w = WHEN[kind];
     const land = w[0] + META[k * 4 + 2] * (w[1] - w[0]), fly = 0.9 + 0.5 * hash(k + 4), u = (t - (land - fly)) / fly;
     if (u <= 0 || u >= 1) continue;
     project(k, kind, tmp);
     const x0 = cx + (hash(k) - 0.5) * W * (portrait ? 0.7 : 0.42), y0 = H * (0.90 + 0.07 * hash(k + 5));
-    for (let tr = 0; tr < 4; tr++) {
+    for (let tr = 0; tr < (TOUCH ? 2 : 4); tr++) {
       const uu = u - tr * 0.045; if (uu <= 0) break;
       const e = 1 - Math.pow(1 - uu, 3), arc = Math.sin(uu * PI);
       const px = x0 + (tmp[0] - x0) * e + arc * (hash(k + 2) - 0.5) * W * 0.16;
       const py = y0 + (tmp[1] - y0) * e - arc * H * 0.05;
-      ink(FIRE[clamp(Math.round((0.98 - tr * 0.2) * (LV - 1)), 0, LV - 1)]);
-      ctx.fillText(tr === 0 ? SOURCE[META[k * 4 + 1] % SOURCE.length] : EMBER[(k + tr) % EMBER.length], Math.round(px / CW) * CW, Math.round(py / CH) * CH);
+      put(FIRE, 0, lvl(0.98 - tr * 0.2), tr === 0 ? SOURCE[META[k * 4 + 1] % SOURCE.length] : EMBER[(k + tr) % EMBER.length], px, py);
     }
   }
 
   // 6. loose embers drifting up from the flames
-  for (let i = 0; i < 340; i++) {
+  for (let i = 0; i < 340 * LOD; i++) {
     const period = 2.2 + 3.2 * hash(i + 21), u = ((t + hash(i + 5) * period) / period) % 1;
     const a = (1 - u) * FL; if (a < 0.05) continue;
     const px = cx + (hash(i + 31) - 0.5) * W * (portrait ? 0.95 : 0.6) + Math.sin(u * 7 + i) * W * 0.012;
     const py = H * 0.93 - u * H * (0.3 + 0.5 * hash(i + 41));
-    ink(FIRE[clamp(Math.round(a * a * (LV - 1)), 0, LV - 1)]);
-    ctx.fillText(EMBER[i % EMBER.length], Math.round(px / CW) * CW, Math.round(py / CH) * CH);
+    put(FIRE, 0, lvl(a * a), EMBER[i % EMBER.length], px, py);
   }
 
   // 6b. a spiral of sparks winding up around the flower while it is forged
   const act = ease((t - 1.0) / 1.2) * (1 - 0.72 * ease((t - DONE - 0.4) / 2.5));
-  for (let i = 0; i < 170; i++) {
+  for (let i = 0; i < 170 * LOD; i++) {
     const u = (t * (0.16 + 0.1 * hash(i + 60)) + hash(i + 61)) % 1, a = u * TAU * 2.5 + i * 2.399 + t * 0.5;
     const R = 0.5 + 0.55 * Math.sin(u * PI) + 0.15 * hash(i + 62);
     const al = Math.sin(u * PI) * act * (0.55 + 0.45 * Math.sin(t * 5 + i)); if (al < 0.05) continue;
     proj3(R * Math.cos(a), R * Math.sin(a), -3.5 + u * 5.2, tmp);
-    ink(t < DONE ? FIRE[lvl(al)] : `rgba(255,${90 + (i % 5) * 22},70,${al.toFixed(2)})`);
-    put(i % 3 ? '.' : '+', tmp[0], tmp[1], tmp[2]);
+    put(t < DONE ? FIRE : DUST, t < DONE ? 0 : 3, lvl(al), i % 3 ? '.' : '+', tmp[0], tmp[1], tmp[2]);
   }
 
   // 6c. twinkling dust floating around the bloom
   const dustA = ease(G[0] * 3);
-  if (dustA > 0.01) for (let i = 0; i < 150; i++) {
+  if (dustA > 0.01) for (let i = 0; i < 150 * LOD; i++) {
     const tw = Math.pow(0.5 + 0.5 * Math.sin(t * (1.5 + 2 * hash(i + 73)) + i * 1.7), 3) * dustA; if (tw < 0.06) continue;
     const a = i * 2.399 + t * (0.12 + 0.2 * hash(i + 70)), el = (hash(i + 71) - 0.5) * 2.4, R = 0.9 + 1.2 * hash(i + 72);
     proj3(R * Math.cos(a) * Math.cos(el * 0.6), R * Math.sin(a) * Math.cos(el * 0.6), 0.6 + el * 0.75 + 0.12 * Math.sin(t * 0.7 + i), tmp);
-    ink(`rgba(255,${150 + (i % 4) * 20},140,${tw.toFixed(2)})`);
-    put(tw > 0.6 ? '*' : tw > 0.3 ? '+' : '.', tmp[0], tmp[1], tmp[2]);
+    put(DUST, 3, lvl(tw), tw > 0.6 ? '*' : tw > 0.3 ? '+' : '.', tmp[0], tmp[1], tmp[2]);
   }
 
   // 6d. the bloom burst: the moment it is finished, sparks fly out of the flower in every direction
   if (t > DONE && t < DONE + 3.4) {
     const s = t - DONE; proj3(0, 0, 0.7, tmp); const bx = tmp[0], by = tmp[1];
-    for (let i = 0; i < 340; i++) {
+    for (let i = 0; i < 340 * LOD; i++) {
       const al = Math.pow(1 - s / 3.4, 1.6) * (0.6 + 0.4 * hash(i + 82)); if (al < 0.04) continue;
       const a = hash(i + 80) * TAU, d = (1 - Math.exp(-2.4 * s)) * (0.25 + 0.75 * hash(i + 81)) * Math.min(W, H) * 0.62;
-      ink(FIRE[lvl(al)]);
-      put(i % 4 === 0 ? SOURCE[(i * 13) % SOURCE.length] : EMBER[i % EMBER.length], bx + Math.cos(a) * d, by + Math.sin(a) * d * 0.8 + s * s * H * 0.022);
+      put(FIRE, 0, lvl(al), i % 4 === 0 ? SOURCE[(i * 13) % SOURCE.length] : EMBER[i % EMBER.length], bx + Math.cos(a) * d, by + Math.sin(a) * d * 0.8 + s * s * H * 0.022);
     }
   }
 
@@ -310,8 +337,7 @@ function render(t) {
   for (let i = 0; i < 54; i++) {
     const period = 7 + 6 * hash(i + 90), s = t - DONE - 0.8 - hash(i + 91) * period; if (s < 0) continue;
     const u = (s / period) % 1, lap = Math.floor(s / period), tum = Math.sin(u * 22 + i * 3);
-    ink(RED[lvl(0.3 + 0.6 * Math.abs(tum))]);
-    put(tum > 0.45 ? '(@)' : tum < -0.45 ? '{o}' : tum > 0 ? '()' : '|', hash(i + 92 + lap * 7.1) * W + Math.sin(u * 5 + i) * W * 0.05, -0.04 * H + u * H * 1.08);
+    put(RED, 1, lvl(0.3 + 0.6 * Math.abs(tum)), tum > 0.45 ? '(@)' : tum < -0.45 ? '{o}' : tum > 0 ? '()' : '|', hash(i + 92 + lap * 7.1) * W + Math.sin(u * 5 + i) * W * 0.05, -0.04 * H + u * H * 1.08);
   }
 
   // 6f. little <3 rising from the bloom
@@ -319,9 +345,10 @@ function render(t) {
   for (let i = 0; i < 12; i++) {
     const period = 5 + 4 * hash(i + 100), s = t - DONE - 2 - hash(i + 101) * period; if (s < 0) continue;
     const u = (s / period) % 1, al = Math.sin(u * PI) * 0.85; if (al < 0.05) continue;
-    ink(`rgba(226,40,62,${al.toFixed(2)})`);
-    put('<3', tmp[0] + (hash(i + 102 + Math.floor(s / period) * 3.3) - 0.5) * S * 2.8 + Math.sin(u * 6 + i) * S * 0.15, tmp[1] - u * S * 2.4);
+    put(LOVE, 4, lvl(al), '<3', tmp[0] + (hash(i + 102 + Math.floor(s / period) * 3.3) - 0.5) * S * 2.8 + Math.sin(u * 6 + i) * S * 0.15, tmp[1] - u * S * 2.4);
   }
+
+  if (SOFT) ctx.putImageData(img, 0, 0);
 
   // 7. soft glow: a quarter-size copy added back on top
   gctx.clearRect(0, 0, glow.width, glow.height); gctx.drawImage(canvas, 0, 0, glow.width, glow.height);
