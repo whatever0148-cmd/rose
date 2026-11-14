@@ -28,10 +28,12 @@ const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const ease = (t) => { t = clamp(t, 0, 1); return t * t * t * (t * (6 * t - 15) + 10); };
 const hash = (n) => { const s = Math.sin(n * 127.1 + 311.7) * 43758.5453; return s - Math.floor(s); };
 const hash2 = (x, y) => { const s = Math.sin(x * 127.1 + y * 311.7) * 43758.5453; return s - Math.floor(s); };
+const NT = new Float32Array(65536); for (let i = 0; i < 65536; i++) NT[i] = hash2(i & 255, i >> 8);
 function noise(x, y) {                                   // smooth value noise
   const xi = Math.floor(x), yi = Math.floor(y), xf = x - xi, yf = y - yi;
   const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
-  const a = hash2(xi, yi), b = hash2(xi + 1, yi), c = hash2(xi, yi + 1), d = hash2(xi + 1, yi + 1);
+  const x0 = xi & 255, x1 = (xi + 1) & 255, y0 = (yi & 255) << 8, y1 = ((yi + 1) & 255) << 8;   // table lookups, no sines
+  const a = NT[y0 | x0], b = NT[y0 | x1], c = NT[y1 | x0], d = NT[y1 | x1];
   return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
 }
 
@@ -129,13 +131,14 @@ let W = 0, H = 0, FS = 10, CW = 6, CH = 11, COLS = 0, ROWS = 0, zbuf, ibuf, DPR 
 const TOUCH = matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0;
 const LOD = TOUCH ? 0.55 : 1;                             // phones draw about half the loose particles
 function resize() {
-  const dpr = DPR = Math.min(window.devicePixelRatio || 1, TOUCH ? 1.5 : 2) * Q;     // Q drops on slow phones to keep it smooth
+  const dpr = DPR = Math.min(window.devicePixelRatio || 1, TOUCH ? 1.5 : 2);     // fixed: the picture never gets coarser, slow phones shed work instead
   // a phone held upright gets the same wide picture as a computer, turned on its side: turn the phone to watch it
   const turned = TOUCH && innerHeight > innerWidth, vw = turned ? innerHeight : innerWidth, vh = turned ? innerWidth : innerHeight;
   canvas.style.inset = 'auto'; canvas.style.left = '0'; canvas.style.top = '0'; canvas.style.width = vw + 'px'; canvas.style.height = vh + 'px';
   canvas.style.transformOrigin = '0 0'; canvas.style.transform = turned ? `translateX(${innerWidth}px) rotate(90deg)` : 'none';
   W = canvas.width = Math.round(vw * dpr); H = canvas.height = Math.round(vh * dpr);
-  FS = Math.max(7, Math.round(Math.min(H / 118, W / 150))); CW = FS * 0.62; CH = FS * 1.08;
+  FS = TOUCH ? Math.max(5, Math.round(H / 100)) : Math.max(7, Math.round(Math.min(H / 118, W / 150)));   // about 100 rows of glyphs on a phone
+  CW = FS * 0.62; CH = FS * 1.08;
   COLS = Math.ceil(W / CW); ROWS = Math.ceil(H / CH);
   zbuf = new Float32Array(COLS * ROWS); ibuf = new Int32Array(COLS * ROWS);
   glow.width = W >> 2; glow.height = H >> 2;
@@ -206,7 +209,7 @@ const fireLevel = (t) => ease((t - 0.35) / 1.3) * (1 - 0.6 * ease((t - DONE - 0.
 const tmp = [0, 0, 0];
 function render(t) {
   const portrait = H > W;
-  S = portrait ? Math.min(W * 0.36, H * 0.195) : H * (W / H > 1.9 ? 0.25 : 0.22);   // a little bigger on a wide phone screen
+  S = portrait ? Math.min(W * 0.36, H * 0.195) : H * (W / H > 1.9 ? 0.27 : 0.22);   // a little bigger on a wide phone screen
   S *= (0.93 + 0.07 * ease(t / DONE)) * (1 + (t > DONE ? 0.045 * Math.exp(-(t - DONE) / 0.45) : 0));   // slow push in, then a punch when it blooms
   cx = portrait ? W * 0.57 : W * 0.65; cy = portrait ? H * 0.31 : H * 0.41;
   const yaw = t * 0.26 + 0.6, pitch = 0.74 + 0.05 * Math.sin(t * 0.4);
@@ -219,7 +222,7 @@ function render(t) {
 
   // 1. depth buffer: nearest surface point for every character cell
   zbuf.fill(1e9); ibuf.fill(-1);
-  const step = COLS * ROWS < 30000 ? (Q < 0.9 ? 3 : 2) : 1;                // a small screen has few cells, so half the points are enough
+  const step = SOFT ? (TIER > 2 ? 13 : 7) : 1;             // a phone screen has few cells, so a seventh of the points still fills every one
   for (let k = 0; k < N; k += step) {
     const kind = META[k * 4]; if (META[k * 4 + 2] > G[kind]) continue;
     project(k, kind, tmp);
@@ -351,8 +354,10 @@ function render(t) {
   if (SOFT) ctx.putImageData(img, 0, 0);
 
   // 7. soft glow: a quarter-size copy added back on top
-  gctx.clearRect(0, 0, glow.width, glow.height); gctx.drawImage(canvas, 0, 0, glow.width, glow.height);
-  ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = 0.5 + 0.6 * flash; ctx.drawImage(glow, 0, 0, W, H); ctx.restore();
+  if (TIER < 2) {
+    gctx.clearRect(0, 0, glow.width, glow.height); gctx.drawImage(canvas, 0, 0, glow.width, glow.height);
+    ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = 0.5 + 0.6 * flash; ctx.drawImage(glow, 0, 0, W, H); ctx.restore();
+  }
   // night: the edges fall away into black, like a flash photo in the dark
   const vg = ctx.createRadialGradient(cx, cy + S * 0.6, S * 1.1, cx, cy + S * 0.6, Math.hypot(W, H) * 0.72);
   vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,0.6)');
@@ -403,12 +408,18 @@ let T0 = performance.now();
 const fixed = new URLSearchParams(location.search).get('t');
 const again = () => { T0 = performance.now(); };
 addEventListener('click', again); addEventListener('keydown', (e) => { if (e.code === 'Space') again(); });
-let prev = 0, slow = 0;
+// A slow phone never gets a coarser picture. It sheds work in steps instead:
+//   tier 1: 30 frames a second    tier 2: no glow pass    tier 3: fewer surface points
+let TIER = 0, prev = 0, slow = 0, lastDraw = -1e9;
 function loop() {
-  const now = performance.now(), dt = now - prev; prev = now;
-  // if frames keep taking too long (a slower phone), draw at a lower resolution instead of stuttering
-  if (fixed === null && dt < 500) { slow = dt > 30 ? slow + 1 : Math.max(0, slow - 1); if (slow > 40 && Q > 0.6) { Q *= 0.85; slow = 0; resize(); } }
-  render(fixed !== null ? +fixed : (now - T0) / 1000); if (fixed === null) requestAnimationFrame(loop);
+  const now = performance.now();
+  if (fixed !== null) { render(+fixed); return; }
+  requestAnimationFrame(loop);
+  if (TIER > 0 && now - lastDraw < 30) return;             // hold a steady 30 instead of a stuttering 60
+  const gap = now - lastDraw; lastDraw = now;
+  render((now - T0) / 1000);
+  const work = performance.now() - now, late = TIER === 0 ? (work > 13 || gap > 24) : (work > 26 || gap > 46);
+  if (gap < 500) { slow = late ? slow + 1 : Math.max(0, slow - 1); if (slow > 24 && TIER < 3) { TIER++; slow = 0; } }
 }
 loop();
 </script>
